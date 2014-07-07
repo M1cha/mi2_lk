@@ -1,4 +1,5 @@
 /* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2014, Xiaomi Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -38,7 +39,8 @@ static struct board_data board = {UNKNOWN,
 	LINUX_MACHTYPE_UNKNOWN,
 	BASEBAND_MSM,
 	PMIC_IS_INVALID,
-	0};
+	0,
+	HW_PLATFORM_P0};
 
 static void platform_detect()
 {
@@ -64,8 +66,11 @@ static void platform_detect()
 			return;
 
 		board.platform = board_info_v6.board_info_v3.msm_id;
+		board.soc_id = board_info_v6.board_info_v3.msm_id;
+		board.soc_version = board_info_v6.board_info_v3.msm_version;
 		board.platform_hw = board_info_v6.board_info_v3.hw_platform;
 		board.platform_subtype = board_info_v6.platform_subtype;
+		board.platform_version = board_info_v6.platform_version;
 	}
 	else if (format == 7)
 	{
@@ -78,16 +83,46 @@ static void platform_detect()
 			return;
 
 		board.platform = board_info_v7.board_info_v3.msm_id;
+		board.soc_id = board_info_v7.board_info_v3.msm_id;
+		board.soc_version = board_info_v7.board_info_v3.msm_version;
 		board.platform_hw = board_info_v7.board_info_v3.hw_platform;
 		board.platform_subtype = board_info_v7.platform_subtype;
 		board.pmic_type = board_info_v7.pmic_type;
 		board.pmic_version = board_info_v7.pmic_version;
+		board.platform_version = board_info_v7.platform_version;
+		board.pmic_model = board_info_v7.pmic_type;
+		board.pmic_die_version = board_info_v7.pmic_version;
+
 	}
 	else
 	{
 		dprintf(CRITICAL, "Unsupported board info format\n");
 		ASSERT(0);
 	}
+}
+
+static void baseband_detect()
+{
+	unsigned baseband = BASEBAND_MSM;
+	unsigned platform_subtype;
+	unsigned platform_id;
+
+	platform_id = board.platform;
+	platform_subtype = board.platform_subtype;
+
+	/* Check for MDM or APQ baseband variants.  Default to MSM */
+	if (platform_subtype == HW_PLATFORM_SUBTYPE_MDM)
+		baseband = BASEBAND_MDM;
+	else if (platform_id == APQ8060)
+		baseband = BASEBAND_APQ;
+	else if (platform_id == APQ8064)
+		baseband = BASEBAND_APQ;
+	else if (platform_id == MPQ8064)
+		baseband = BASEBAND_APQ;
+	else
+		baseband = BASEBAND_MSM;
+
+	board.baseband = baseband;
 }
 
 void board_init()
@@ -125,4 +160,39 @@ uint32_t board_pmic_type()
 uint32_t board_pmic_ver()
 {
 	return board.pmic_version;
+}
+
+uint32_t board_platform_hw(void)
+{
+	return board.platform_hw;
+}
+
+uint32_t board_platform_subtype(void)
+{
+	return board.platform_subtype;
+}
+
+uint32_t board_platform_version(void)
+{
+	return board.platform_version;
+}
+
+uint32_t board_soc_id(void)
+{
+	return board.soc_id;
+}
+
+uint32_t board_soc_version(void)
+{
+	return board.soc_version;
+}
+
+uint32_t board_pmic_model(void)
+{
+	return board.pmic_model;
+}
+
+uint32_t board_pmic_die_version(void)
+{
+	return board.pmic_die_version;
 }

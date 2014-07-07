@@ -3,6 +3,7 @@
  * All rights reserved.
  *
  * Copyright (c) 2009-2013, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2014, Xiaomi Corporation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -49,6 +50,7 @@
 #include <partition_parser.h>
 #include <platform.h>
 #include <crypto_hash.h>
+#include <smem.h>
 
 #if DEVICE_TREE
 #include <libfdt.h>
@@ -64,6 +66,7 @@
 #include "board.h"
 
 #include "scm.h"
+#include "aboot.h"
 
 /* fastboot command function pointer */
 typedef void (*fastboot_cmd_fn) (const char *, void *, unsigned);
@@ -134,6 +137,23 @@ static const char *baseband_dsda    = " androidboot.baseband=dsda";
 static const char *baseband_dsda2   = " androidboot.baseband=dsda2";
 static const char *baseband_sglte2  = " androidboot.baseband=sglte2";
 
+static const char *earlyprintk = DEBUGLEVEL > 1 ? " earlyprintk" : "";
+
+unsigned pu_reason = 0;
+unsigned reboot_mode = 0;
+unsigned fastboot_reason = 0;
+
+/* keep them same length */
+static const char *boot0_cmdline = " syspart=system ";
+static const char *boot1_cmdline = " syspart=system1";
+
+enum {
+	DUALBOOT_BOOT_NONE,
+	DUALBOOT_BOOT_FIRST,
+	DUALBOOT_BOOT_SECOND,
+};
+static unsigned dual_boot_sign = DUALBOOT_BOOT_NONE;
+
 /* Assuming unauthorized kernel image by default */
 static int auth_kernel_img = 0;
 
@@ -193,11 +213,17 @@ unsigned char *update_cmdline(const char * cmdline)
 
 	cmdline_len += strlen(usb_sn_cmdline);
 	cmdline_len += strlen(sn_buf);
+	cmdline_len += strlen(earlyprintk);
 
 	if (target_pause_for_battery_charge()) {
 		pause_at_bootup = 1;
 		cmdline_len += strlen(battchg_pause);
 	}
+
+	/* bootX_cmdline is a mandatory parameter
+	 * it should be there in any case
+	 */
+	cmdline_len += strlen(boot0_cmdline);
 
 	if(target_use_signed_kernel() && auth_kernel_img) {
 		cmdline_len += strlen(auth_kernel);
@@ -269,9 +295,25 @@ unsigned char *update_cmdline(const char * cmdline)
 		if (have_cmdline) --dst;
 		have_cmdline = 1;
 		while ((*dst++ = *src++));
+		src = earlyprintk;
+		if (have_cmdline) --dst;
+		have_cmdline = 1;
+		while ((*dst++ = *src++));
 
 		if (pause_at_bootup) {
 			src = battchg_pause;
+			if (have_cmdline) --dst;
+			while ((*dst++ = *src++));
+		}
+
+		if (dual_boot_sign == DUALBOOT_BOOT_SECOND) {
+			src = boot1_cmdline;
+			if (have_cmdline) --dst;
+			while ((*dst++ = *src++));
+		} else {
+			if (dual_boot_sign == DUALBOOT_BOOT_NONE)
+				dprintf(CRITICAL, "ERROR: boot and system not chosen\n");
+			src = boot0_cmdline;
 			if (have_cmdline) --dst;
 			while ((*dst++ = *src++));
 		}
@@ -415,6 +457,9 @@ void generate_atags(unsigned *ptr, const char *cmdline,
 	ptr = atag_core(ptr);
 	ptr = atag_ramdisk(ptr, ramdisk, ramdisk_size);
 	ptr = target_atag_mem(ptr);
+	ptr = target_atag_pureason(ptr);
+	ptr = target_atag_hwversion(ptr);
+	ptr = target_atag_memvendor(ptr);
 
 	/* Skip NAND partition ATAGS for eMMC boot */
 	if (!target_is_emmc_boot()){
@@ -511,6 +556,46 @@ static unsigned char buf[4096]; //Equal to max-supported pagesize
 #if DEVICE_TREE
 static unsigned char dt_buf[4096];
 #endif
+#define DUALBOOT_OFFSET_SECTORS 8	/* 4 pages, for recovery_message */
+
+static void check_boot_image(void)
+{
+	int index = INVALID_PTN;
+	unsigned long long ptn = 0;
+	struct dual_boot_message *dualboot_msg;
+
+	if (dual_boot_sign != DUALBOOT_BOOT_NONE)
+		goto out;
+
+	dual_boot_sign = DUALBOOT_BOOT_FIRST;
+
+	index = partition_get_index("misc");
+	ptn = partition_get_offset(index);
+	if (ptn == 0) {
+		dprintf(CRITICAL, "ERROR: No misc found\n");
+		goto out;
+	}
+
+	ptn += DUALBOOT_OFFSET_SECTORS * MMC_BOOT_RD_BLOCK_LEN;
+	memset(buf, 0, sizeof(buf));
+	if (mmc_read(ptn, (unsigned int *)buf, MMC_BOOT_RD_BLOCK_LEN)) {
+		dprintf(CRITICAL, "ERROR: Cannot read misc\n");
+		goto out;
+	}
+
+	dualboot_msg = (struct dual_boot_message *)buf;
+
+	if (!strncmp(dualboot_msg->command, "boot-system", 11)) {
+		if (dualboot_msg->command[11] == '1')
+			dual_boot_sign = DUALBOOT_BOOT_SECOND;
+	} else
+		dprintf(CRITICAL, "WARNING: dual_boot_message not set\n");
+
+out:
+	/* either DUALBOOT_BOOT_FIRST or DUALBOOT_BOOT_SECOND at this point */
+	dprintf(INFO, "Dualboot choosing: %d of (1, 2) boot & system\n",
+		dual_boot_sign);
+}
 
 static void verify_signed_bootimg(uint32_t bootimg_addr, uint32_t bootimg_size)
 {
@@ -579,7 +664,12 @@ int boot_linux_from_mmc(void)
 		goto unified_boot;
 	}
 	if (!boot_into_recovery) {
-		index = partition_get_index("boot");
+		check_boot_image();
+
+		if (dual_boot_sign == DUALBOOT_BOOT_SECOND)
+			index = partition_get_index("boot1");
+		else
+			index = partition_get_index("boot");
 		ptn = partition_get_offset(index);
 		if(ptn == 0) {
 			dprintf(CRITICAL, "ERROR: No boot partition found\n");
@@ -1399,11 +1489,15 @@ void cmd_boot(const char *arg, void *data, unsigned sz)
 	}
 #endif
 
+	check_boot_image();
+
 	fastboot_okay("");
 	udc_stop();
 
 	memmove((void*) hdr->ramdisk_addr, ptr + page_size + kernel_actual, hdr->ramdisk_size);
 	memmove((void*) hdr->kernel_addr, ptr + page_size, hdr->kernel_size);
+
+	pu_reason |= RESTART_EVENT_NORMAL;
 
 	boot_linux((void*) hdr->kernel_addr, (void*) hdr->tags_addr,
 		   (const char*) hdr->cmdline, board_machtype(),
@@ -1471,10 +1565,18 @@ void cmd_flash_mmc_img(const char *arg, void *data, unsigned sz)
 	unsigned long long size = 0;
 	int index = INVALID_PTN;
 
-	if (!strcmp(arg, "partition"))
+	if (!strcmp(arg, "partition-erase"))
 	{
 		dprintf(INFO, "Attempt to write partition image.\n");
-		if (write_partition(sz, (unsigned char *) data)) {
+		if (write_partition(sz, (unsigned char *) data, 1)) {
+			fastboot_fail("failed to write partition");
+			return;
+		}
+	}
+	else if (!strcmp(arg, "partition"))
+	{
+		dprintf(INFO, "Attempt to write partition image w/o erasing.\n");
+		if (write_partition(sz, (unsigned char *) data, 0)) {
 			fastboot_fail("failed to write partition");
 			return;
 		}
@@ -1488,7 +1590,8 @@ void cmd_flash_mmc_img(const char *arg, void *data, unsigned sz)
 			return;
 		}
 
-		if (!strcmp(arg, "boot") || !strcmp(arg, "recovery")) {
+		if (!strcmp(arg, "boot") || !strcmp(arg, "boot1")
+				|| !strcmp(arg, "recovery")) {
 			if (memcmp((void *)data, BOOT_MAGIC, BOOT_MAGIC_SIZE)) {
 				fastboot_fail("image is not a boot image");
 				return;
@@ -1773,7 +1876,7 @@ void cmd_reboot(const char *arg, void *data, unsigned sz)
 {
 	dprintf(INFO, "rebooting the device\n");
 	fastboot_okay("");
-	reboot_device(0);
+	reboot_device(NORMAL_MODE);
 }
 
 void cmd_reboot_bootloader(const char *arg, void *data, unsigned sz)
@@ -1833,6 +1936,14 @@ void splash_screen ()
 	}
 }
 
+static char machtype_buf[16] = {0};
+static char soc_id_buf[16] = {0};
+static char soc_version_buf[16] = {0};
+static char pmic_model_buf[16] = "unknown";
+static char pmic_die_version_buf[16] = "unknown";
+#define SOCINFO_VERSION_MAJOR(ver) ((ver & 0xffff0000) >> 16)
+#define SOCINFO_VERSION_MINOR(ver) (ver & 0x0000ffff)
+
 /* register commands and variables for fastboot */
 void aboot_fastboot_register_commands(void)
 {
@@ -1863,13 +1974,18 @@ void aboot_fastboot_register_commands(void)
 	fastboot_publish("product", TARGET(BOARD));
 	fastboot_publish("kernel", "lk");
 	fastboot_publish("serialno", sn_buf);
+	fastboot_publish("machtype", machtype_buf);
+	fastboot_publish("soc-id", soc_id_buf);
+	fastboot_publish("soc-version", soc_version_buf);
+	fastboot_publish("pmic-model", pmic_model_buf);
+	fastboot_publish("pmic-die-version", pmic_die_version_buf);
 
 }
 void aboot_init(const struct app_descriptor *app)
 {
-	unsigned reboot_mode = 0;
 	unsigned usb_init = 0;
 	unsigned sz = 0;
+	uint32_t ret = 0;
 
 	/* Setup page size information for nand/emmc reads */
 	if (target_is_emmc_boot())
@@ -1894,18 +2010,37 @@ void aboot_init(const struct app_descriptor *app)
 	target_serialno((unsigned char *) sn_buf);
 	dprintf(SPEW,"serial number: %s\n",sn_buf);
 	surf_udc_device.serialno = sn_buf;
+	sprintf(machtype_buf, "%04x", board_target_id());
+	dprintf(CRITICAL, "mach type: %s, 0x%x\n", machtype_buf, board_target_id());
+	ret = board_soc_id();
+	sprintf(soc_id_buf, "%d\n", ret);
+	dprintf(CRITICAL, "soc id: %s, 0x%x\n", soc_id_buf, ret);
+	ret = board_soc_version();
+	sprintf(soc_version_buf, "%u.%u\n", SOCINFO_VERSION_MAJOR(ret), SOCINFO_VERSION_MINOR(ret));
+	dprintf(CRITICAL, "soc version: %s, 0x%x\n", soc_version_buf, ret);
+	ret = board_pmic_model();
+	if (ret) {
+		sprintf(pmic_model_buf, "%d\n", ret);
+		dprintf(CRITICAL, "pmic type: %s, 0x%x\n", ret);
+	}
+	ret = board_pmic_die_version();
+	if (ret) {
+		sprintf(pmic_die_version_buf, "%d\n", ret);
+		dprintf(CRITICAL, "pmic version: %s, 0x%x\n", ret);
+	}
 
 	/* Check if we should do something other than booting up */
-	if (keys_get_state(KEY_HOME) != 0)
+	if ((keys_get_state(KEY_VOLUMEUP) != 0) && !(keys_get_state(KEY_VOLUMEDOWN) != 0)) {
+		dprintf(INFO, "KEY_VOLUMEUP pressed\n");
 		boot_into_recovery = 1;
-	if (keys_get_state(KEY_VOLUMEUP) != 0)
-		boot_into_recovery = 1;
+	}
 	if(!boot_into_recovery)
 	{
-		if (keys_get_state(KEY_BACK) != 0)
+		if (!(keys_get_state(KEY_VOLUMEUP) != 0) && (keys_get_state(KEY_VOLUMEDOWN) != 0)) {
+			dprintf(INFO, "KEY_VOLUMEDOWN pressed\n");
+			fastboot_reason = 1;
 			goto fastboot;
-		if (keys_get_state(KEY_VOLUMEDOWN) != 0)
-			goto fastboot;
+		}
 	}
 
 	#if NO_KEYPAD_DRIVER
@@ -1913,12 +2048,17 @@ void aboot_init(const struct app_descriptor *app)
 		goto fastboot;
 	#endif
 
-	reboot_mode = check_reboot_mode();
 	if (reboot_mode == RECOVERY_MODE) {
 		boot_into_recovery = 1;
-	} else if(reboot_mode == FASTBOOT_MODE) {
+	} else if (reboot_mode == FASTBOOT_MODE) {
+		fastboot_reason = 2;
 		goto fastboot;
+	} else if (reboot_mode == BOOT0_MODE) {
+		dual_boot_sign = DUALBOOT_BOOT_FIRST;
+	} else if (reboot_mode == BOOT1_MODE) {
+		dual_boot_sign = DUALBOOT_BOOT_SECOND;
 	}
+	dprintf(INFO, "boot_into_recovery %d \n", boot_into_recovery);
 
 	if (target_is_emmc_boot())
 	{
@@ -1947,12 +2087,13 @@ void aboot_init(const struct app_descriptor *app)
 #endif
 		boot_linux_from_flash();
 	}
+	fastboot_reason = 3;
 	dprintf(CRITICAL, "ERROR: Could not do normal boot. Reverting "
 		"to fastboot mode.\n");
 
 fastboot:
 
-	target_fastboot_init();
+	target_fastboot_init(fastboot_reason);
 
 	if(!usb_init)
 		udc_init(&surf_udc_device);
