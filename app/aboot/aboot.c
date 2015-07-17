@@ -2017,6 +2017,7 @@ void aboot_fastboot_register_commands(void)
 	fastboot_publish("pmic-model", pmic_model_buf);
 	fastboot_publish("pmic-die-version", pmic_die_version_buf);
 
+	fastboot_publish("supports_partition_erase", "true");
 }
 void aboot_init(const struct app_descriptor *app)
 {
