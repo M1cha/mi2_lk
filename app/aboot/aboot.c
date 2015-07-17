@@ -139,6 +139,10 @@ static const char *baseband_sglte2  = " androidboot.baseband=sglte2";
 
 static const char *earlyprintk = DEBUGLEVEL > 1 ? " earlyprintk" : "";
 
+static bool has_storage_partition = false;
+static const char *cmdline_sdcardtype_stdalone = " androidboot.sdcard.type=stdalone";
+static const char *cmdline_sdcardtype_mixed = " androidboot.sdcard.type=mixed";
+
 unsigned pu_reason = 0;
 unsigned reboot_mode = 0;
 unsigned fastboot_reason = 0;
@@ -214,6 +218,17 @@ unsigned char *update_cmdline(const char * cmdline)
 	cmdline_len += strlen(usb_sn_cmdline);
 	cmdline_len += strlen(sn_buf);
 	cmdline_len += strlen(earlyprintk);
+
+	if (has_storage_partition) {
+		cmdline_len += strlen(cmdline_sdcardtype_stdalone);
+	}
+	else {
+		cmdline_len += strlen(cmdline_sdcardtype_mixed);
+	}
+
+	if (target_is_emmc_boot()) {
+		cmdline_len += strlen(emmc_cmdline);
+	}
 
 	if (target_pause_for_battery_charge()) {
 		pause_at_bootup = 1;
@@ -296,6 +311,16 @@ unsigned char *update_cmdline(const char * cmdline)
 		have_cmdline = 1;
 		while ((*dst++ = *src++));
 		src = earlyprintk;
+		if (have_cmdline) --dst;
+		have_cmdline = 1;
+		while ((*dst++ = *src++));
+
+		if (has_storage_partition) {
+			src = cmdline_sdcardtype_stdalone;
+		}
+		else {
+			src = cmdline_sdcardtype_mixed;
+		}
 		if (have_cmdline) --dst;
 		have_cmdline = 1;
 		while ((*dst++ = *src++));
@@ -2006,6 +2031,8 @@ void aboot_init(const struct app_descriptor *app)
 		read_device_info(&device);
 
 	}
+
+	has_storage_partition = (partition_get_index("storage")!=INVALID_PTN);
 
 	target_serialno((unsigned char *) sn_buf);
 	dprintf(SPEW,"serial number: %s\n",sn_buf);
